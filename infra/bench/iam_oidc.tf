@@ -151,6 +151,70 @@ data "aws_iam_policy_document" "github_actions_run_bench" {
     ]
     resources = [aws_ecr_repository.bench.arn]
   }
+
+  # RegisterTaskDefinition - required by benchmark-promote-image.yml to
+  # register a new task definition revision pointing at the chosen ECR tag.
+  # AWS does not support resource-level permissions for RegisterTaskDefinition,
+  # so it must be "*"; tfsec aws-iam-no-policy-wildcards suppression covers
+  # this pattern.
+  statement {
+    sid       = "RegisterTaskDefinition"
+    effect    = "Allow"
+    actions   = ["ecs:RegisterTaskDefinition"]
+    resources = ["*"]
+  }
+
+  # DeregisterTaskDefinition is called by Terraform when changing image_tag
+  # forces a revision replacement on aws_ecs_task_definition.bench. Unlike
+  # Register, this action DOES accept resource ARNs, so it's scoped to the
+  # bench family only (no ability to deregister other modules' task defs).
+  statement {
+    sid       = "DeregisterBenchTaskDefinition"
+    effect    = "Allow"
+    actions   = ["ecs:DeregisterTaskDefinition"]
+    resources = ["arn:aws:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.name_prefix}:*"]
+  }
+
+  # Terraform state bucket - read+write on the opensre-bench/ prefix only,
+  # so this role can run `terraform apply` from the promote-image workflow.
+  # ListBucket is scoped to the bucket but conditioned on s3:prefix to
+  # prevent enumerating other modules' state keys; object actions are
+  # scoped to the prefix directly.
+  statement {
+    sid       = "TerraformStateBucketList"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::tracer-cloud-tfstate-${data.aws_caller_identity.current.account_id}"]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["opensre-bench/*"]
+    }
+  }
+
+  statement {
+    sid    = "TerraformStateObject"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["arn:aws:s3:::tracer-cloud-tfstate-${data.aws_caller_identity.current.account_id}/opensre-bench/*"]
+  }
+
+  # Terraform state lock table - terraform apply takes/releases a lock on
+  # every run. Scoped to the single tflock table.
+  statement {
+    sid    = "TerraformStateLock"
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+    ]
+    resources = ["arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/tracer-cloud-tflock"]
+  }
 }
 
 resource "aws_iam_role_policy" "github_actions_run_bench" {
